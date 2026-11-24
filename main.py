@@ -12,6 +12,7 @@ import json
 import sys
 from pathlib import Path
 
+from ioc_entropy import analyze_entropy_and_iocs
 from pe_inspector import NotPE, inspect_pe
 from safety import (AbortRequested, KillSwitch, ScopeError, check_output_path,
                     check_scope, confirm_disclaimer, enumerate_targets,
@@ -97,9 +98,16 @@ def analyze_file(path: Path, max_bytes: int) -> dict:
             result["md5"] = hashlib.md5(data, usedforsecurity=False).hexdigest()
         except (TypeError, ValueError):
             pass
-        result["analysis"] = inspect_pe(data)
-    except NotPE as exc:
-        result.update(status="error", error=f"Not a valid PE file: {exc}")
+        try:
+            pe_info = inspect_pe(data)
+            result["analysis"] = pe_info
+            result["entropy_and_iocs"] = analyze_entropy_and_iocs(data, pe_info)
+        except NotPE as exc:
+            result.update(
+                status="error",
+                error=f"Not a valid PE file: {exc}",
+                entropy_and_iocs=analyze_entropy_and_iocs(data, pe_info=None),
+            )
     except (OSError, MemoryError) as exc:
         result.update(status="error", error=f"Cannot read file: {exc}")
     except Exception as exc:                    # last line of defence: never crash
@@ -121,6 +129,21 @@ def format_result(r: dict) -> str:
     if "md5" in r:
         out.append(_kv("MD5", r["md5"], 0))
     out.append("-" * 72)
+
+    ei = r.get("entropy_and_iocs")
+    if ei:
+        out.append(f"\n[Entropy & Static IOCs]  (file entropy: {ei['file_entropy']} / {ei['entropy_assessment']})")
+        if ei.get("section_entropies"):
+            for s in ei["section_entropies"]:
+                rwx_tag = " [W+X]" if s.get("rwx") else ""
+                out.append(f"  Section {s['name']:<9} entropy={s['entropy']:.4f} ({s['raw_size']} bytes){rwx_tag}")
+        iocs = ei.get("iocs", {})
+        for key in ("ipv4", "urls", "domains", "emails", "registry_keys", "suspicious_apis"):
+            vals = iocs.get(key) or []
+            if vals:
+                out.append(f"  {key:<16}: {', '.join(vals[:10])}" + (" ..." if len(vals) > 10 else ""))
+        for f in ei.get("findings", []):
+            out.append(f"  [{f['severity']:<6}] {f['message']}")
 
     if r["status"] != "ok":
         out.append(f"[!] {r['error']}")
@@ -193,6 +216,7 @@ def format_result(r: dict) -> str:
             out.append(f"  [{f['severity']:<6}] {f['message']}")
     else:
         out.append("  none")
+
     return "\n".join(out)
 
 
